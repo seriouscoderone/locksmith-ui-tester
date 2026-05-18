@@ -1,0 +1,22 @@
+[project]
+name = "locksmith-ui-tester"
+version = "0.1.0"
+description = "Dev-only UI test harness plugin for Locksmith"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13"
+authors = [{ name = "seriouscoderone" }]
+dependencies = []
+
+[project.scripts]
+devctl = "locksmith_ui_tester.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/seriouscoderone/locksmith-ui-tester"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
