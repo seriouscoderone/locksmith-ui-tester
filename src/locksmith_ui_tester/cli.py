@@ -45,7 +45,7 @@ def send(op: str, kwargs: dict, socket_path: str, timeout: float) -> dict:
     except OSError as e:
         raise SystemExit(
             f"devctl: cannot connect to {socket_path}: {e}\n"
-            f"  Is the wallet running with LOCKSMITH_DEV_CONTROL=1 set?"
+            f"  Is the wallet running with the locksmith-ui-tester plugin installed and active?"
         )
     payload = {"op": op, **kwargs}
     sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
