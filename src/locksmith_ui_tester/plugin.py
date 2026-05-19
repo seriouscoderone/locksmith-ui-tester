@@ -43,6 +43,11 @@ class LocksmithUiTesterPlugin(AppPlugin):
         )
 
     def get_app_services(self) -> list[Any]:
+        # The PluginManager calls this exactly once per plugin per
+        # app lifecycle (immediately after on_app_started, see
+        # locksmith.plugins.manager). Constructing a fresh server
+        # here is therefore safe — there will not be two servers
+        # competing for the same socket.
         if self._window is None:
             return []
         return [DevControlServer(self._window)]

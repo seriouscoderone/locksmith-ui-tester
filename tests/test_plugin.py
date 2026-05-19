@@ -15,7 +15,7 @@ def test_plugin_id_is_ui_tester():
     assert plugin.plugin_id == "ui_tester"
 
 
-def test_initialize_is_a_noop(qtbot):
+def test_initialize_is_a_noop():
     """initialize() runs at discovery time, before any window exists."""
     plugin = LocksmithUiTesterPlugin()
     plugin.initialize(app=None)
@@ -58,3 +58,23 @@ def test_get_app_services_passes_window_to_server(qtbot):
     # DevControlServer keeps the window as _window — same attr in the
     # ported code. Verify the reference is the captured one.
     assert server._window is window
+
+
+def test_on_app_started_called_twice_replaces_window(qtbot):
+    """Second on_app_started call replaces the captured window.
+
+    Documents intent rather than guarding against a real production
+    scenario — the PluginManager only fires on_app_started once per
+    app lifecycle. But if the contract ever changes, assignment wins
+    by design.
+    """
+    plugin = LocksmithUiTesterPlugin()
+    first = QMainWindow()
+    second = QMainWindow()
+    qtbot.addWidget(first)
+    qtbot.addWidget(second)
+
+    plugin.on_app_started(app=None, window=first)
+    plugin.on_app_started(app=None, window=second)
+
+    assert plugin._window is second
