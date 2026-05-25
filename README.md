@@ -1,6 +1,6 @@
 # locksmith-ui-tester
 
-> **⚠️ Dev tool only.** This plugin opens a UNIX socket at `/tmp/locksmith-control.sock` that lets **any local process** drive the Locksmith wallet UI — inspect widgets, click buttons, type text, read screenshots. Install only on a development machine. **Do NOT install on a wallet that holds real keys.**
+> **⚠️ Dev tool only.** This plugin opens a UNIX socket at `~/.locksmith-control.sock` (override with `LOCKSMITH_CONTROL_SOCKET`) that lets **any local process** drive the Locksmith wallet UI — inspect widgets, click buttons, type text, read screenshots. Install only on a development machine. **Do NOT install on a wallet that holds real keys.**
 
 An installable Locksmith plugin that exposes a JSON-over-unix-socket control surface for driving the running UI from test scripts, dev loops, or AI-assisted development.
 
@@ -44,7 +44,7 @@ Or invoke it directly: `python -m locksmith_ui_tester.cli ping`.
 
 ## Security
 
-The socket lives at `/tmp/locksmith-control.sock` with the file permissions Qt's `QLocalServer` sets by default — readable/writable by any process on the local system running as the same user. Anyone who can reach that socket can drive the wallet completely. This is the trust boundary. Install only where you accept that boundary.
+The socket lives at `~/.locksmith-control.sock` by default (override via the `LOCKSMITH_CONTROL_SOCKET` env var or `devctl --socket`). Hosting it under HOME means two Locksmith instances launched with different `HOME` values get independent sockets automatically. File permissions are whatever Qt's `QLocalServer` sets by default — readable/writable by any process on the local system running as the same user. Anyone who can reach that socket can drive the wallet completely. This is the trust boundary. Install only where you accept that boundary.
 
 ## License
 

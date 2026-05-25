@@ -33,8 +33,10 @@ import json
 import socket
 import sys
 
+from locksmith_ui_tester.paths import default_socket_path
 
-DEFAULT_SOCKET_PATH = "/tmp/locksmith-control.sock"
+
+DEFAULT_SOCKET_PATH = default_socket_path()
 
 
 def send(op: str, kwargs: dict, socket_path: str, timeout: float) -> dict:

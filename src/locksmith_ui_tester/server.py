@@ -6,10 +6,10 @@ Control server for the locksmith-ui-tester plugin. Lifecycle is managed
 by the Locksmith plugin system: start() runs after on_app_started,
 stop() runs before on_app_stopping.
 
-Listens on a Unix socket at /tmp/locksmith-control.sock and accepts
-newline-delimited JSON commands that drive the live UI on the Qt main
-thread. Trust boundary: any local process that can reach the socket can
-drive the app. The plugin install confirmation in Locksmith is what
+Listens on a Unix socket under HOME (default ~/.locksmith-control.sock)
+and accepts newline-delimited JSON commands that drive the live UI on the
+Qt main thread. Trust boundary: any local process that can reach the socket
+can drive the app. The plugin install confirmation in Locksmith is what
 gates that access — see the plugin's locksmith-plugin.toml description.
 
 Wire protocol:
@@ -27,11 +27,13 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QMainWindow, QWidget
 from keri import help
 
+from locksmith_ui_tester.paths import default_socket_path
+
 
 logger = help.ogler.getLogger(__name__)
 
 
-DEFAULT_SOCKET_PATH = "/tmp/locksmith-control.sock"
+DEFAULT_SOCKET_PATH = default_socket_path()
 
 
 class DevControlServer(QObject):

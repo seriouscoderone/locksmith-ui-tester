@@ -3,7 +3,7 @@ entry_point = "locksmith_ui_tester.plugin:LocksmithUiTesterPlugin"
 manifest_version = 1
 name = "Locksmith UI Tester"
 version = "0.1.0"
-description = "Dev-only UI test harness. Opens a UNIX socket at /tmp/locksmith-control.sock that lets any local process drive the wallet UI — inspect widgets, click buttons, type text, read screenshots. Install only on a development machine; do NOT install on a wallet holding real keys."
+description = "Dev-only UI test harness. Opens a UNIX socket at ~/.locksmith-control.sock (override via LOCKSMITH_CONTROL_SOCKET) that lets any local process drive the wallet UI — inspect widgets, click buttons, type text, read screenshots. Install only on a development machine; do NOT install on a wallet holding real keys."
 author = "seriouscoderone"
 homepage = "https://github.com/seriouscoderone/locksmith-ui-tester"
 requires_locksmith = ">=0.0.1"
