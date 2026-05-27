@@ -125,9 +125,17 @@ class DevControlServer(QObject):
 
     def _respond(self, client: QLocalSocket, payload: dict[str, Any]) -> None:
         data = json.dumps(payload).encode("utf-8") + b"\n"
-        client.write(data)
-        client.flush()
-        client.disconnectFromServer()
+        # The client may have already disconnected / been deleted while we
+        # were dispatching — common when a slot opens a blocking modal
+        # dialog (QFileDialog, QMessageBox) and devctl times out waiting.
+        # Writing to a freed C++ object raises RuntimeError into Qt's event
+        # loop, which can crash the whole wallet. Guard it.
+        try:
+            client.write(data)
+            client.flush()
+            client.disconnectFromServer()
+        except RuntimeError as e:
+            logger.warning("DevControlServer: client gone before reply could send (%s)", e)
 
     # ----- dispatch --------------------------------------------------
 
