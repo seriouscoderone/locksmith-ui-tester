@@ -276,6 +276,11 @@ class DevControlServer(QObject):
                 if item.text().strip() == item_text:
                     lw.setCurrentItem(item)
                     lw.itemClicked.emit(item)
+                    # Also emit QAbstractItemView.clicked(QModelIndex) — some
+                    # consumers (e.g. Locksmith's vault drawer) connect to that
+                    # signal rather than itemClicked. Real mouse clicks emit
+                    # both; we need to too.
+                    lw.clicked.emit(lw.indexFromItem(item))
                     return {
                         "ok": True,
                         "list_object_name": lw.objectName(),
