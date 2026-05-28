@@ -157,6 +157,18 @@ class DevControlServer(QObject):
             "click_list_item": self._op_click_list_item,
             "type": self._op_type,
             "select": self._op_select,
+            # Peer-mode integration-test helpers. These intentionally
+            # bypass UI to keep the integration fixture light.
+            "peer_open_test_vault": self._op_peer_open_test_vault,
+            "peer_create_test_aid": self._op_peer_create_test_aid,
+            "peer_set_mode": self._op_peer_set_mode,
+            "peer_expose_aid": self._op_peer_expose_aid,
+            "peer_unexpose_aid": self._op_peer_unexpose_aid,
+            "peer_force_pair": self._op_peer_force_pair,
+            "peer_list": self._op_peer_list,
+            "peer_get_port": self._op_peer_get_port,
+            "peer_get_aid_pre": self._op_peer_get_aid_pre,
+            "peer_test_send": self._op_peer_test_send,
         }
 
     # ----- operations ------------------------------------------------
@@ -376,3 +388,198 @@ class DevControlServer(QObject):
             if isinstance(tt, str) and tt.strip() == target:
                 matches.append(w)
         return matches[0] if matches else None
+
+    # ----- peer-mode helpers ----------------------------------------
+
+    def _app(self):
+        return getattr(self._window, "app", None)
+
+    def _vault(self):
+        app = self._app()
+        return getattr(app, "vault", None) if app else None
+
+    def _op_peer_open_test_vault(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Create + open a vault programmatically for tests.
+
+        Bypasses the open-vault dialog entirely; matches what the dialog
+        does internally (format_bran -> stretch -> habbing.Habery ->
+        run_vault_controller).
+        """
+        from keri.app import habbing as kerihabbing
+        from keri.core import signing
+        from keri.vdr import credentialing
+        from locksmith.core.habbing import (
+            format_bran, keystore_exists, open_hby,
+        )
+        from locksmith.core.crypto import stretch_password_to_passcode
+
+        name = cmd.get("name") or "peer_test"
+        passcode = cmd.get("passcode") or "DoB2-e4Rr-gVOr-Nb1Y-7yBl-gI3n-i4cB-gf07"
+        app = self._app()
+        if app is None:
+            return {"error": "no app"}
+
+        bran = stretch_password_to_passcode(format_bran(passcode))
+        base = app.config.base
+        if not keystore_exists(name, base):
+            salt = signing.Salter(raw=app.config.salt.encode("utf-8")).qb64
+            hby = kerihabbing.Habery(
+                name=name, base=base, bran=bran, salt=salt,
+                algo=app.config.algo, tier=app.config.tier,
+            )
+            hby.close()
+
+        try:
+            vault, qtask = open_hby(name=name, base=base, bran=bran, app=app)
+            app.open_vault(name=name, vault=vault, qtask=qtask)
+            return {"ok": True, "name": name}
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"open failed: {e}"}
+
+    def _op_peer_create_test_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Create a transferable AID with no witnesses (for direct-mode tests)."""
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        alias = cmd.get("alias")
+        if not alias:
+            return {"error": "alias is required"}
+        if vault.hby.habByName(alias) is not None:
+            return {"ok": True, "aid": vault.hby.habByName(alias).pre, "existing": True}
+        try:
+            hab = vault.hby.makeHab(name=alias, transferable=True, wits=[], toad=0)
+            return {"ok": True, "aid": hab.pre}
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"makeHab failed: {e}"}
+
+    def _op_peer_set_mode(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        from locksmith.peer.records import PeerModeSettings
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        rec = PeerModeSettings(
+            enabled=bool(cmd.get("enabled", True)),
+            port=int(cmd.get("port", 0)),
+            bind_host=cmd.get("bind_host", "127.0.0.1"),
+            advertised_host=cmd.get("advertised_host", "127.0.0.1"),
+        )
+        vault.db.peerSettings.pin(keys=("default",), val=rec)
+        vault.restart_peer_mode()
+        return {"ok": True}
+
+    def _op_peer_expose_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        alias = cmd.get("alias")
+        hab = vault.hby.habByName(alias) if alias else None
+        if hab is None:
+            return {"error": f"no hab {alias!r}"}
+        exposed = getattr(vault, "_peer_exposed_aids", None)
+        if exposed is None:
+            exposed = set()
+            vault._peer_exposed_aids = exposed
+        exposed.add(hab.pre)
+        return {"ok": True, "aid": hab.pre}
+
+    def _op_peer_unexpose_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        alias = cmd.get("alias")
+        hab = vault.hby.habByName(alias) if alias else None
+        if hab is None:
+            return {"error": f"no hab {alias!r}"}
+        exposed = getattr(vault, "_peer_exposed_aids", set())
+        exposed.discard(hab.pre)
+        return {"ok": True, "aid": hab.pre}
+
+    def _op_peer_force_pair(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Directly insert a PeerRecord into the allowlist, bypassing OOBI
+        resolution. Test-only — real users use the Add Peer dialog.
+        """
+        from datetime import datetime, timezone
+        from locksmith.peer.allowlist import PeerAllowlist
+        from locksmith.peer.records import PeerRecord
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        aid = cmd.get("aid")
+        endpoint_url = cmd.get("endpoint_url")
+        if not aid or not endpoint_url:
+            return {"error": "aid and endpoint_url are required"}
+        PeerAllowlist(vault.db).add(PeerRecord(
+            aid=aid,
+            label=cmd.get("label") or aid[:12],
+            endpoint_url=endpoint_url,
+            paired_at=datetime.now(timezone.utc).isoformat(),
+        ))
+        return {"ok": True}
+
+    def _op_peer_list(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        from locksmith.peer.allowlist import PeerAllowlist
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        al = PeerAllowlist(vault.db)
+        return {
+            "ok": True,
+            "peers": [
+                {"aid": r.aid, "label": r.label, "endpoint_url": r.endpoint_url}
+                for r in al.list()
+            ],
+        }
+
+    def _op_peer_get_port(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        vault = self._vault()
+        if vault is None or vault.peer_doer is None or vault.peer_doer.server is None:
+            return {"error": "peer mode not running"}
+        ha = vault.peer_doer.server.ha
+        # hio Server.ha is (host, port) after bind
+        try:
+            host, port = ha
+        except (TypeError, ValueError):
+            return {"error": f"unexpected ha shape: {ha!r}"}
+        return {"ok": True, "host": host, "port": port}
+
+    def _op_peer_get_aid_pre(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        alias = cmd.get("alias")
+        hab = vault.hby.habByName(alias) if alias else None
+        if hab is None:
+            return {"error": f"no hab {alias!r}"}
+        return {"ok": True, "aid": hab.pre}
+
+    def _op_peer_test_send(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Drive peer_send with given recipient + bytes. Stub mailbox
+        callback records whether fallback was attempted. Test-only."""
+        from locksmith.peer.allowlist import PeerAllowlist
+        from locksmith.peer.sending import peer_send
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        recipient_aid = cmd.get("recipient_aid")
+        payload_str = cmd.get("payload", "")
+        if not recipient_aid:
+            return {"error": "recipient_aid is required"}
+        payload = payload_str.encode("utf-8") if isinstance(payload_str, str) else bytes(payload_str)
+
+        mailbox_calls = []
+
+        def stub_mailbox(aid, bs):
+            mailbox_calls.append((aid, len(bs)))
+            return True
+
+        outcome = peer_send(
+            allowlist=PeerAllowlist(vault.db),
+            recipient_aid=recipient_aid,
+            exn_bytes=payload,
+            mailbox_send=stub_mailbox,
+        )
+        return {
+            "ok": True,
+            "outcome": outcome.value,
+            "mailbox_calls": mailbox_calls,
+        }
