@@ -155,6 +155,7 @@ class DevControlServer(QObject):
             "current_page": self._op_current_page,
             "click": self._op_click,
             "click_list_item": self._op_click_list_item,
+            "click_table_row": self._op_click_table_row,
             "type": self._op_type,
             "select": self._op_select,
             # Peer-mode integration-test helpers. These intentionally
@@ -169,6 +170,7 @@ class DevControlServer(QObject):
             "peer_get_port": self._op_peer_get_port,
             "peer_get_aid_pre": self._op_peer_get_aid_pre,
             "peer_test_send": self._op_peer_test_send,
+            "peer_nav": self._op_peer_nav,
         }
 
     # ----- operations ------------------------------------------------
@@ -287,11 +289,11 @@ class DevControlServer(QObject):
                 item = lw.item(i)
                 if item.text().strip() == item_text:
                     lw.setCurrentItem(item)
-                    lw.itemClicked.emit(item)
-                    # Also emit QAbstractItemView.clicked(QModelIndex) — some
-                    # consumers (e.g. Locksmith's vault drawer) connect to that
-                    # signal rather than itemClicked. Real mouse clicks emit
-                    # both; we need to too.
+                    # QListWidget internally translates clicked(QModelIndex)
+                    # into itemClicked(QListWidgetItem) — emitting only
+                    # `clicked` triggers both signal chains. Previously this
+                    # code emitted itemClicked AND clicked which fired the
+                    # consumer slot twice (and opened duplicate dialogs).
                     lw.clicked.emit(lw.indexFromItem(item))
                     return {
                         "ok": True,
@@ -301,6 +303,42 @@ class DevControlServer(QObject):
                     }
         return {"error": f"list item not found: {item_text!r}"}
 
+    def _op_click_table_row(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Click a row in a QTableWidget by matching any cell's text.
+
+        QTableWidget items are not QWidgets, so `click`/`click_list_item`
+        can't reach them. This walks visible QTableWidgets, finds the
+        first row containing the target text in any cell, and emits
+        cellClicked(row, 0) — which is what Locksmith's PaginatedTable
+        listens for to fire its row_clicked signal.
+        """
+        text = cmd.get("text")
+        if not text:
+            return {"error": "text is required"}
+        from PySide6.QtWidgets import QTableWidget
+        for tw in self._window.findChildren(QTableWidget):
+            if not tw.isVisible():
+                continue
+            for row in range(tw.rowCount()):
+                for col in range(tw.columnCount()):
+                    item = tw.item(row, col)
+                    if item is None:
+                        continue
+                    if item.text().strip() == text:
+                        tw.selectRow(row)
+                        # Emit both cellPressed and cellClicked since
+                        # different consumers may listen on either signal.
+                        # Locksmith's PaginatedTable listens on cellPressed.
+                        tw.cellPressed.emit(row, 0)
+                        tw.cellClicked.emit(row, 0)
+                        return {
+                            "ok": True,
+                            "row": row,
+                            "matched_col": col,
+                            "cell_text": item.text(),
+                        }
+        return {"error": f"table row not found: {text!r}"}
+
     def _op_type(self, cmd: dict[str, Any]) -> dict[str, Any]:
         target = cmd.get("target")
         text = cmd.get("text", "")
@@ -309,12 +347,34 @@ class DevControlServer(QObject):
         widget = self._find_widget(target)
         if widget is None:
             return {"error": f"widget not found: {target!r}"}
-        if hasattr(widget, "setPlainText") and type(widget).__name__ == "QPlainTextEdit":
+        # Drill into wrapper widgets that expose an inner QLineEdit /
+        # QTextEdit. Locksmith's FloatingLabelLineEdit stores the actual
+        # input as `.line_edit`; calling setText on the wrapper writes to
+        # the floating label instead of the input. Match on attribute, not
+        # class, so we handle any wrapper that follows this pattern.
+        from PySide6.QtWidgets import QLineEdit, QPlainTextEdit, QTextEdit
+        inner = (
+            getattr(widget, "line_edit", None)
+            or getattr(widget, "text_edit", None)
+            or getattr(widget, "plain_text_edit", None)
+        )
+        if isinstance(inner, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            widget = inner
+        if isinstance(widget, QPlainTextEdit):
             widget.setPlainText(text)
-            return {"ok": True}
+            return {"ok": True, "wrote_to": type(widget).__name__}
+        # QSpinBox / QDoubleSpinBox: accept numeric text and call setValue
+        from PySide6.QtWidgets import QSpinBox, QDoubleSpinBox
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            try:
+                value = float(text) if isinstance(widget, QDoubleSpinBox) else int(text)
+            except ValueError:
+                return {"error": f"{type(widget).__name__} expects numeric text, got {text!r}"}
+            widget.setValue(value)
+            return {"ok": True, "wrote_to": type(widget).__name__, "value": value}
         if hasattr(widget, "setText"):
             widget.setText(text)
-            return {"ok": True}
+            return {"ok": True, "wrote_to": type(widget).__name__}
         return {"error": f"widget {type(widget).__name__} has no setText/setPlainText"}
 
     def _op_select(self, cmd: dict[str, Any]) -> dict[str, Any]:
@@ -387,6 +447,22 @@ class DevControlServer(QObject):
                 tt = ""
             if isinstance(tt, str) and tt.strip() == target:
                 matches.append(w)
+                continue
+            # Locksmith's MenuButton stores its visible label in a
+            # `label_text` attribute. FloatingLabelLineEdit stores the
+            # same idea under `_label_text` (private). Match either so
+            # the vault navigation menu AND input wrappers are reachable
+            # by their visible label.
+            lt = getattr(w, "label_text", None) or getattr(w, "_label_text", None)
+            if isinstance(lt, str) and lt.strip() == target:
+                matches.append(w)
+        # When two widgets compete for the same label (e.g. a FloatingLabelLineEdit
+        # AND its inner QLabel both expose "Passcode"), prefer the wrapper.
+        # The wrapper is the input widget the user expects to type into.
+        if len(matches) > 1:
+            wrappers = [w for w in matches if hasattr(w, "line_edit") or hasattr(w, "text_edit")]
+            if wrappers:
+                return wrappers[0]
         return matches[0] if matches else None
 
     # ----- peer-mode helpers ----------------------------------------
@@ -432,6 +508,15 @@ class DevControlServer(QObject):
         try:
             vault, qtask = open_hby(name=name, base=base, bran=bran, app=app)
             app.open_vault(name=name, vault=vault, qtask=qtask)
+            # Trigger UI navigation to the vault page so the rest of the
+            # peer-mode UI is reachable through normal devctl click ops.
+            try:
+                from locksmith.ui.navigation import Pages
+                window = self._window
+                if hasattr(window, "nav_manager"):
+                    window.nav_manager.navigate_to(Pages.VAULT, vault_name=name)
+            except Exception:
+                pass  # navigation is a UX nicety, not required for the op
             return {"ok": True, "name": name}
         except Exception as e:  # noqa: BLE001
             return {"error": f"open failed: {e}"}
@@ -551,6 +636,26 @@ class DevControlServer(QObject):
         if hab is None:
             return {"error": f"no hab {alias!r}"}
         return {"ok": True, "aid": hab.pre}
+
+    def _op_peer_nav(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Programmatically switch the vault content area to a given page.
+
+        Workaround for MenuButton storing its label in label_text instead
+        of via setText(), which makes it unfindable by the harness text
+        lookup. Bypasses menu click; calls _show_page directly.
+        """
+        key = cmd.get("key", "settings")
+        app = self._app()
+        vault_page = getattr(app, "_vault_page", None) if app else None
+        if vault_page is None:
+            vault_page = getattr(self._window, "_vault_page", None)
+        if vault_page is None:
+            return {"error": "no vault page"}
+        try:
+            vault_page._show_page(key)
+            return {"ok": True, "key": key}
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"navigation failed: {e}"}
 
     def _op_peer_test_send(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Drive peer_send with given recipient + bytes. Stub mailbox
