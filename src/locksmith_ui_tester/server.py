@@ -156,6 +156,7 @@ class DevControlServer(QObject):
             "click": self._op_click,
             "click_list_item": self._op_click_list_item,
             "click_table_row": self._op_click_table_row,
+            "click_row_action": self._op_click_row_action,
             "type": self._op_type,
             "select": self._op_select,
             # Peer-mode integration-test helpers. These intentionally
@@ -339,6 +340,73 @@ class DevControlServer(QObject):
                         }
         return {"error": f"table row not found: {text!r}"}
 
+    def _op_click_row_action(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Trigger a row-action menu item (e.g. "Rotate", "Delete") for the
+        row whose any cell matches ``row_text``. Acts on PaginatedTable's
+        Actions column, which is set up with a SkewersMenuButton via
+        ``setCellWidget``.
+
+        Args:
+            row_text: text in any cell of the target row (e.g. an alias).
+            action: name of the action to trigger (case-sensitive, must
+                match the SkewersMenuButton's actions_list).
+
+        We trigger the action by emitting the SkewersMenuButton's
+        ``action_triggered`` signal directly — the same signal the QMenu
+        items would fire — so the rest of the row-action handler stack
+        runs exactly as if the user had clicked through the popup.
+        """
+        row_text = cmd.get("row_text")
+        action = cmd.get("action")
+        if not row_text or not action:
+            return {"error": "row_text and action are required"}
+        from PySide6.QtWidgets import QTableWidget
+        # Lazy import — Locksmith may not be on PYTHONPATH from harness tests
+        try:
+            from locksmith.ui.toolkit.tables.components import SkewersMenuButton
+        except Exception:  # noqa: BLE001
+            SkewersMenuButton = None
+
+        for tw in self._window.findChildren(QTableWidget):
+            if not tw.isVisible():
+                continue
+            for row in range(tw.rowCount()):
+                row_matches = False
+                for col in range(tw.columnCount()):
+                    item = tw.item(row, col)
+                    if item is not None and item.text().strip() == row_text:
+                        row_matches = True
+                        break
+                if not row_matches:
+                    continue
+                # Find the SkewersMenuButton in any cell widget on this row.
+                for col in range(tw.columnCount()):
+                    cell = tw.cellWidget(row, col)
+                    if cell is None:
+                        continue
+                    candidates = [cell]
+                    if SkewersMenuButton is not None:
+                        candidates.extend(cell.findChildren(SkewersMenuButton))
+                    for candidate in candidates:
+                        if SkewersMenuButton is None or not isinstance(candidate, SkewersMenuButton):
+                            continue
+                        if action not in candidate.actions_list:
+                            return {
+                                "error": f"action {action!r} not available on row "
+                                         f"{row_text!r}; available={candidate.actions_list}",
+                            }
+                        candidate.action_triggered.emit(action)
+                        return {
+                            "ok": True,
+                            "row": row,
+                            "action": action,
+                            "row_text": row_text,
+                        }
+                return {
+                    "error": f"row {row_text!r} matched but no SkewersMenuButton found",
+                }
+        return {"error": f"table row not found: {row_text!r}"}
+
     def _op_type(self, cmd: dict[str, Any]) -> dict[str, Any]:
         target = cmd.get("target")
         text = cmd.get("text", "")
@@ -378,21 +446,75 @@ class DevControlServer(QObject):
         return {"error": f"widget {type(widget).__name__} has no setText/setPlainText"}
 
     def _op_select(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Select an item in a QComboBox by visible text.
+
+        Drives through ``findText`` + ``setCurrentIndex`` rather than
+        ``setCurrentText``: ExtensibleSelectorWidget (and many other
+        consumers) listen on ``currentIndexChanged``, which fires only
+        on an actual index change. ``setCurrentText`` on a non-editable
+        combo is a no-op when the text already matches, and even when
+        it does change the index, Qt's behavior is inconsistent across
+        versions about whether the signal fires.
+
+        Also accepts ``index`` (int) for cases where the visible text
+        is ambiguous (two items named "Select Witnesses", etc.).
+
+        Optional ``occurrence`` (int, 0-based) picks among multiple
+        widgets that share a label/objectName — useful when a dialog
+        has two structurally-identical combos for "Add" and "Remove".
+        """
         target = cmd.get("target")
         value = cmd.get("value")
-        if not target or value is None:
-            return {"error": "target and value are required"}
-        widget = self._find_widget(target)
+        index = cmd.get("index")
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        if value is None and index is None:
+            return {"error": "value or index is required"}
+
+        widget = self._find_widget(target, occurrence=occurrence)
         if widget is None:
-            return {"error": f"widget not found: {target!r}"}
-        if hasattr(widget, "setCurrentText"):
-            widget.setCurrentText(str(value))
-            return {"ok": True}
-        return {"error": f"widget {type(widget).__name__} is not a QComboBox"}
+            return {"error": f"widget not found: {target!r} (occurrence={occurrence})"}
+
+        # FloatingLabelComboBox wraps a QComboBox child; resolve to it.
+        combo = widget
+        if not hasattr(combo, "setCurrentIndex") or not hasattr(combo, "findText"):
+            inner = getattr(combo, "combo_box", None) or getattr(combo, "_combo", None)
+            if inner is not None:
+                combo = inner
+        if not hasattr(combo, "setCurrentIndex") or not hasattr(combo, "findText"):
+            return {"error": f"widget {type(widget).__name__} is not a QComboBox"}
+
+        if index is not None:
+            target_idx = int(index)
+        else:
+            target_idx = combo.findText(str(value))
+            if target_idx < 0:
+                # Enumerate available items for the diagnostic — much
+                # easier to debug than "select failed silently".
+                items = [combo.itemText(i) for i in range(combo.count())]
+                return {
+                    "error": f"value {value!r} not found in combo "
+                             f"{target!r}; available={items}",
+                }
+
+        # Force currentIndexChanged to fire even if we're "setting" the
+        # same index (rare, but ExtensibleSelectorWidget resets to -1
+        # after each pick — the natural next pick may be the same index
+        # as before from the user's POV). Toggling through -1 mirrors
+        # what a real click does.
+        if combo.currentIndex() == target_idx:
+            combo.setCurrentIndex(-1)
+        combo.setCurrentIndex(target_idx)
+        return {
+            "ok": True,
+            "selected_index": target_idx,
+            "selected_text": combo.itemText(target_idx),
+        }
 
     # ----- widget lookup --------------------------------------------
 
-    def _find_widget(self, target: str) -> QWidget | None:
+    def _find_widget(self, target: str, occurrence: int = 0) -> QWidget | None:
         """Find a visible widget by selector.
 
         Selectors supported:
@@ -403,9 +525,10 @@ class DevControlServer(QObject):
             (e.g. "QLineEdit:0", "LocksmithButton:1"). Index respects
             widget-tree order. Useful when widgets lack names/text.
 
-        Returns the first match. Ambiguous targets return the first hit
-        in widget-tree order — caller is responsible for using a more
-        specific target when that's not what they want.
+        ``occurrence`` picks the Nth structurally-identical match in
+        widget-tree order (e.g. a dialog with two combos labeled "Select
+        Witnesses"). Defaults to 0 (first match). Same widget-tree order
+        as the Type:N selector.
         """
         # Type:N selector path
         if ":" in target:
@@ -456,14 +579,27 @@ class DevControlServer(QObject):
             lt = getattr(w, "label_text", None) or getattr(w, "_label_text", None)
             if isinstance(lt, str) and lt.strip() == target:
                 matches.append(w)
-        # When two widgets compete for the same label (e.g. a FloatingLabelLineEdit
-        # AND its inner QLabel both expose "Passcode"), prefer the wrapper.
-        # The wrapper is the input widget the user expects to type into.
+        # When two widgets compete for the same label (e.g. a
+        # FloatingLabelLineEdit AND its inner QLabel both expose
+        # "Passcode"), prefer the wrapper — that's the input widget the
+        # user expects to interact with. Wrapper detection covers
+        # FloatingLabelLineEdit (.line_edit), FloatingLabelPlainTextEdit
+        # (.text_edit), and FloatingLabelComboBox (.combo_box). Without
+        # this, a `select` against a label shared by N combos would pick
+        # up the floating QLabels as part of the occurrence list and
+        # misalign indices.
         if len(matches) > 1:
-            wrappers = [w for w in matches if hasattr(w, "line_edit") or hasattr(w, "text_edit")]
+            wrappers = [
+                w for w in matches
+                if hasattr(w, "line_edit")
+                or hasattr(w, "text_edit")
+                or hasattr(w, "combo_box")
+            ]
             if wrappers:
-                return wrappers[0]
-        return matches[0] if matches else None
+                matches = wrappers
+        if 0 <= occurrence < len(matches):
+            return matches[occurrence]
+        return matches[0] if matches and occurrence == 0 else None
 
     # ----- peer-mode helpers ----------------------------------------
 
