@@ -440,6 +440,16 @@ class DevControlServer(QObject):
                 return {"error": f"{type(widget).__name__} expects numeric text, got {text!r}"}
             widget.setValue(value)
             return {"ok": True, "wrote_to": type(widget).__name__, "value": value}
+        # Editable QComboBox: drive the inner QLineEdit. setCurrentText
+        # on an editable combo with a value not in its item list updates
+        # the visible text but doesn't fire signals reliably; routing
+        # through the lineEdit's setText mirrors a user typing.
+        from PySide6.QtWidgets import QComboBox
+        if isinstance(widget, QComboBox) and widget.isEditable():
+            line = widget.lineEdit()
+            if line is not None:
+                line.setText(text)
+                return {"ok": True, "wrote_to": f"{type(widget).__name__}.lineEdit"}
         if hasattr(widget, "setText"):
             widget.setText(text)
             return {"ok": True, "wrote_to": type(widget).__name__}
