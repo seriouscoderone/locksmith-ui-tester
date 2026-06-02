@@ -170,6 +170,8 @@ class DevControlServer(QObject):
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
             "peer_get_aid_pre": self._op_peer_get_aid_pre,
+            "peer_export_blob": self._op_peer_export_blob,
+            "peer_import_blob": self._op_peer_import_blob,
             "peer_test_send": self._op_peer_test_send,
             "peer_nav": self._op_peer_nav,
         }
@@ -653,6 +655,22 @@ class DevControlServer(QObject):
 
         try:
             vault, qtask = open_hby(name=name, base=base, bran=bran, app=app)
+            # Optionally enable peer mode at the desired port. Vault.__init__
+            # has already run with the (default) settings — peer_doer is
+            # None. We pin the desired settings, then call
+            # restart_peer_mode, which on a None peer_doer simply
+            # constructs + extends. This avoids the dead-doer crash from
+            # restarting an already-running peer doer.
+            peer = cmd.get("peer") or {}
+            if peer:
+                from locksmith.peer.records import PeerModeSettings
+                vault.db.peerSettings.pin(keys=("default",), val=PeerModeSettings(
+                    enabled=bool(peer.get("enabled", True)),
+                    port=int(peer.get("port", 5621)),
+                    bind_host=peer.get("bind_host", "127.0.0.1"),
+                    advertised_host=peer.get("advertised_host", "127.0.0.1"),
+                ))
+                vault.restart_peer_mode()
             app.open_vault(name=name, vault=vault, qtask=qtask)
             # Trigger UI navigation to the vault page so the rest of the
             # peer-mode UI is reachable through normal devctl click ops.
@@ -699,6 +717,14 @@ class DevControlServer(QObject):
         return {"ok": True}
 
     def _op_peer_expose_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Mirror the View Identifier "Expose over peer mode" toggle: mark
+        the AID exposed AND publish the peer-role/loc rpys via
+        PublishPeerRoleDoer. Without the doer, replyToOobi returns only
+        the KEL — no role/loc — and CESR-blob pairing fails with
+        "no_peer_role" on the importer.
+        """
+        from locksmith.peer.publishing import PublishPeerRoleDoer
+        from locksmith.peer.records import PeerModeSettings
         vault = self._vault()
         if vault is None:
             return {"error": "no vault open"}
@@ -711,7 +737,16 @@ class DevControlServer(QObject):
             exposed = set()
             vault._peer_exposed_aids = exposed
         exposed.add(hab.pre)
-        return {"ok": True, "aid": hab.pre}
+
+        settings = vault.db.peerSettings.get(keys=("default",)) or PeerModeSettings()
+        host = settings.advertised_host or "127.0.0.1"
+        url = f"tcp://{host}:{settings.port}"
+        doer = PublishPeerRoleDoer(
+            hby=vault.hby, hab=hab, url=url,
+            signal_bridge=getattr(vault, "signals", None), allow=True,
+        )
+        vault.extend([doer])
+        return {"ok": True, "aid": hab.pre, "url": url}
 
     def _op_peer_unexpose_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
         vault = self._vault()
@@ -782,6 +817,62 @@ class DevControlServer(QObject):
         if hab is None:
             return {"error": f"no hab {alias!r}"}
         return {"ok": True, "aid": hab.pre}
+
+    def _op_peer_import_blob(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Mirror Add Peer dialog blob path: import the blob into the
+        vault's Habery (parses KEL + role/loc) and add the peer to the
+        allowlist with the blob's tcp endpoint.
+
+        Returns {ok: True, aid, endpoint_url}. label defaults to aid[:12].
+        """
+        from datetime import datetime, timezone
+        from keri import kering
+        from locksmith.peer.allowlist import PeerAllowlist
+        from locksmith.peer.cesr_blob import (
+            PeerBlobError, import_peer_blob,
+        )
+        from locksmith.peer.records import PeerRecord
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        blob = cmd.get("blob")
+        if not blob:
+            return {"error": "blob is required"}
+        try:
+            aid = import_peer_blob(vault.hby, blob)
+        except PeerBlobError as e:
+            return {"error": f"{e.reason}: {e}"}
+        loc = vault.hby.db.locs.get(keys=(aid, kering.Schemes.tcp))
+        endpoint_url = cmd.get("endpoint_url") or (loc.url if loc else "")
+        if not endpoint_url:
+            return {"error": "no tcp endpoint in blob"}
+        PeerAllowlist(vault.db).add(PeerRecord(
+            aid=aid,
+            label=cmd.get("label") or aid[:12],
+            endpoint_url=endpoint_url,
+            paired_at=datetime.now(timezone.utc).isoformat(),
+        ))
+        return {"ok": True, "aid": aid, "endpoint_url": endpoint_url}
+
+    def _op_peer_export_blob(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Export the witness-less peer-OOBI blob for an exposed AID.
+
+        Mirrors what the View Identifier dialog renders when the user
+        picks the "Peer (offline)" role — same export_peer_blob call.
+        Returns {ok: True, token: "locksmith-peer-oobi:v1:<b64>"}.
+        """
+        from locksmith.peer.cesr_blob import export_peer_blob
+        vault = self._vault()
+        if vault is None:
+            return {"error": "no vault open"}
+        alias = cmd.get("alias")
+        hab = vault.hby.habByName(alias) if alias else None
+        if hab is None:
+            return {"error": f"no hab {alias!r}"}
+        try:
+            return {"ok": True, "token": export_peer_blob(hab)}
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"export_peer_blob failed: {e}"}
 
     def _op_peer_nav(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Programmatically switch the vault content area to a given page.
