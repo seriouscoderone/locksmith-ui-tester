@@ -176,14 +176,12 @@ class DevControlServer(QObject):
             # ops above; see plan in branch feat/direct-peer-design.
             "peer_open_test_vault": self._op_peer_open_test_vault,
             "peer_create_test_aid": self._op_peer_create_test_aid,
-            "peer_set_mode": self._op_peer_set_mode,
             "peer_force_pair": self._op_peer_force_pair,
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
             "peer_get_aid_pre": self._op_peer_get_aid_pre,
             "peer_import_blob": self._op_peer_import_blob,
             "peer_test_send": self._op_peer_test_send,
-            "peer_nav": self._op_peer_nav,
         }
 
     # ----- operations ------------------------------------------------
@@ -989,21 +987,6 @@ class DevControlServer(QObject):
                 pass  # signal best-effort; harness state still consistent
         return {"ok": True, "aid": hab.pre}
 
-    def _op_peer_set_mode(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        from locksmith.peer.records import PeerModeSettings
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        rec = PeerModeSettings(
-            enabled=bool(cmd.get("enabled", True)),
-            port=int(cmd.get("port", 0)),
-            bind_host=cmd.get("bind_host", "127.0.0.1"),
-            advertised_host=cmd.get("advertised_host", "127.0.0.1"),
-        )
-        vault.db.peerSettings.pin(keys=("default",), val=rec)
-        vault.restart_peer_mode()
-        return {"ok": True}
-
     def _op_peer_force_pair(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Directly insert a PeerRecord into the allowlist, bypassing OOBI
         resolution. Test-only — real users use the Add Peer dialog.
@@ -1097,26 +1080,6 @@ class DevControlServer(QObject):
             paired_at=datetime.now(timezone.utc).isoformat(),
         ))
         return {"ok": True, "aid": aid, "endpoint_url": endpoint_url}
-
-    def _op_peer_nav(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Programmatically switch the vault content area to a given page.
-
-        Workaround for MenuButton storing its label in label_text instead
-        of via setText(), which makes it unfindable by the harness text
-        lookup. Bypasses menu click; calls _show_page directly.
-        """
-        key = cmd.get("key", "settings")
-        app = self._app()
-        vault_page = getattr(app, "_vault_page", None) if app else None
-        if vault_page is None:
-            vault_page = getattr(self._window, "_vault_page", None)
-        if vault_page is None:
-            return {"error": "no vault page"}
-        try:
-            vault_page._show_page(key)
-            return {"ok": True, "key": key}
-        except Exception as e:  # noqa: BLE001
-            return {"error": f"navigation failed: {e}"}
 
     def _op_peer_test_send(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Drive peer_send with given recipient + bytes. Stub mailbox
