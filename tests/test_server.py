@@ -244,6 +244,136 @@ def test_select_combo_value(qapp, server):
     assert combo.currentText() == "government"
 
 
+def test_get_text_reads_line_edit(qapp, server):
+    window, _srv, sock_path = server
+    field = window.findChild(QLineEdit, "name_field")
+    field.setText("Alice")
+    result = _client_send(qapp, sock_path,
+                          {"op": "get_text", "target": "name_field"})
+    qapp.processEvents()
+    assert result["ok"] is True
+    assert result["text"] == "Alice"
+
+
+def test_get_text_reads_button_label(qapp, server):
+    _window, _srv, sock_path = server
+    result = _client_send(qapp, sock_path,
+                          {"op": "get_text", "target": "hello_button"})
+    assert result["ok"] is True
+    assert result["text"] == "Hello"
+
+
+def test_get_text_reads_combo_current(qapp, server):
+    window, _srv, sock_path = server
+    combo = window.findChild(QComboBox, "kind_combo")
+    combo.setCurrentText("organization")
+    result = _client_send(qapp, sock_path,
+                          {"op": "get_text", "target": "kind_combo"})
+    qapp.processEvents()
+    assert result["ok"] is True
+    assert result["text"] == "organization"
+
+
+def test_is_visible_distinguishes_existence_from_visibility(qapp, server):
+    window, _srv, sock_path = server
+    # Existing, visible widget
+    r1 = _client_send(qapp, sock_path,
+                      {"op": "is_visible", "target": "hello_button"})
+    assert r1 == {"ok": True, "visible": True, "exists": True}
+
+    # Existing widget but hidden
+    btn = window.findChild(QPushButton, "hello_button")
+    btn.hide()
+    qapp.processEvents()
+    r2 = _client_send(qapp, sock_path,
+                      {"op": "is_visible", "target": "hello_button"})
+    assert r2 == {"ok": True, "visible": False, "exists": True}
+    btn.show()
+
+    # Non-existent widget
+    r3 = _client_send(qapp, sock_path,
+                      {"op": "is_visible", "target": "ghost_widget"})
+    assert r3 == {"ok": True, "visible": False, "exists": False}
+
+
+def test_wait_for_returns_when_widget_appears(qapp, server):
+    window, _srv, sock_path = server
+    btn = window.findChild(QPushButton, "hello_button")
+    btn.hide()
+    qapp.processEvents()
+
+    # Schedule the widget to show shortly after wait_for begins
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(150, btn.show)
+
+    result = _client_send(qapp, sock_path,
+                          {"op": "wait_for", "target": "hello_button",
+                           "condition": "visible", "timeout_ms": 2000},
+                          timeout_s=3.0)
+    assert result["ok"] is True
+    assert result["elapsed_ms"] >= 100
+
+
+def test_wait_for_times_out_when_widget_never_appears(qapp, server):
+    _window, _srv, sock_path = server
+    result = _client_send(qapp, sock_path,
+                          {"op": "wait_for", "target": "ghost_widget",
+                           "condition": "visible", "timeout_ms": 200},
+                          timeout_s=2.0)
+    assert "error" in result
+    assert "timeout" in result["error"]
+
+
+def test_count_returns_matching_visible_widgets(qapp, server):
+    # The window has 1 QLineEdit, 1 QComboBox, 1 QPlainTextEdit, 1 QPushButton.
+    _window, _srv, sock_path = server
+    r1 = _client_send(qapp, sock_path,
+                      {"op": "count", "target": "QPushButton"})
+    assert r1["ok"] is True
+    assert r1["count"] >= 1  # may also have internal Qt buttons; >=1 is enough
+
+    r2 = _client_send(qapp, sock_path,
+                      {"op": "count", "target": "hello_button"})
+    assert r2["ok"] is True
+    assert r2["count"] == 1
+
+    r3 = _client_send(qapp, sock_path,
+                      {"op": "count", "target": "ghost_widget"})
+    assert r3 == {"ok": True, "count": 0}
+
+
+def test_get_table_rows_reads_qtablewidget_content(qapp, server):
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+    window, _srv, sock_path = server
+    table = QTableWidget(2, 2)
+    table.setObjectName("demoTable")
+    table.setHorizontalHeaderLabels(["AID", "Label"])
+    table.setItem(0, 0, QTableWidgetItem("EAID_ONE"))
+    table.setItem(0, 1, QTableWidgetItem("alice"))
+    table.setItem(1, 0, QTableWidgetItem("EAID_TWO"))
+    table.setItem(1, 1, QTableWidgetItem("bob"))
+    window.centralWidget().layout().addWidget(table)
+    table.show()
+    qapp.processEvents()
+
+    result = _client_send(qapp, sock_path,
+                          {"op": "get_table_rows", "target": "demoTable"})
+    assert result["ok"] is True
+    assert result["headers"] == ["AID", "Label"]
+    assert result["rows"] == [
+        {"AID": "EAID_ONE", "Label": "alice"},
+        {"AID": "EAID_TWO", "Label": "bob"},
+    ]
+
+
+def test_get_table_rows_rejects_non_table(qapp, server):
+    _window, _srv, sock_path = server
+    result = _client_send(qapp, sock_path,
+                          {"op": "get_table_rows", "target": "hello_button"})
+    assert "error" in result
+    assert "not QTableWidget" in result["error"]
+
+
 def test_invalid_json_returns_error(qapp, server):
     _window, _srv, sock_path = server
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

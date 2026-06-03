@@ -159,8 +159,19 @@ class DevControlServer(QObject):
             "click_row_action": self._op_click_row_action,
             "type": self._op_type,
             "select": self._op_select,
+            # Generic state-inspection ops. Cypress-equivalent: cy.get().text(),
+            # cy.get().should('be.visible'), cy.get().its('length'),
+            # cy.contains(...).wait(), etc. Tests should prefer these over
+            # the feature-coupled peer_* ops below.
+            "get_text": self._op_get_text,
+            "is_visible": self._op_is_visible,
+            "wait_for": self._op_wait_for,
+            "count": self._op_count,
+            "get_table_rows": self._op_get_table_rows,
             # Peer-mode integration-test helpers. These intentionally
             # bypass UI to keep the integration fixture light.
+            # TODO: refactor each into click sequences using the generic
+            # ops above; see plan in branch feat/direct-peer-design.
             "peer_open_test_vault": self._op_peer_open_test_vault,
             "peer_create_test_aid": self._op_peer_create_test_aid,
             "peer_set_mode": self._op_peer_set_mode,
@@ -523,6 +534,223 @@ class DevControlServer(QObject):
             "selected_index": target_idx,
             "selected_text": combo.itemText(target_idx),
         }
+
+    # ----- state inspection (Cypress-like assertions) ---------------
+
+    def _op_get_text(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Read the visible text of a widget.
+
+        Resolves wrapper widgets (FloatingLabelLineEdit → inner line_edit,
+        FloatingLabelComboBox → currentText, etc.) so callers get what
+        the user actually sees. For widgets without a meaningful text
+        method, returns empty string.
+        """
+        target = cmd.get("target")
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        widget = self._find_widget(target, occurrence=occurrence)
+        if widget is None:
+            return {"error": f"widget not found: {target!r}"}
+
+        from PySide6.QtWidgets import (
+            QComboBox, QLabel, QLineEdit, QPlainTextEdit, QSpinBox,
+            QDoubleSpinBox, QTextEdit, QAbstractButton,
+        )
+
+        inner = (
+            getattr(widget, "line_edit", None)
+            or getattr(widget, "text_edit", None)
+            or getattr(widget, "combo_box", None)
+            or getattr(widget, "_combo", None)
+        )
+        if inner is not None:
+            widget = inner
+
+        if isinstance(widget, QComboBox):
+            return {"ok": True, "text": widget.currentText()}
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            return {"ok": True, "text": str(widget.value())}
+        if isinstance(widget, (QLineEdit,)):
+            return {"ok": True, "text": widget.text()}
+        if isinstance(widget, (QTextEdit, QPlainTextEdit)):
+            return {"ok": True, "text": widget.toPlainText()}
+        # QLabel / QAbstractButton both expose .text()
+        if isinstance(widget, (QLabel, QAbstractButton)):
+            return {"ok": True, "text": widget.text()}
+        if hasattr(widget, "text"):
+            try:
+                return {"ok": True, "text": widget.text()}
+            except Exception:  # noqa: BLE001
+                pass
+        return {"ok": True, "text": ""}
+
+    def _op_is_visible(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """True if a widget exists in the tree AND is currently visible.
+
+        Visibility here means Qt's isVisible() — the widget is on a
+        currently-displayed page/dialog. Find uses the same selector
+        semantics as click/type/select but does NOT require visibility,
+        so callers can poll for "appears soon."
+        """
+        target = cmd.get("target")
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        widget = self._find_widget_any(target, occurrence=occurrence)
+        if widget is None:
+            return {"ok": True, "visible": False, "exists": False}
+        return {"ok": True, "visible": widget.isVisible(), "exists": True}
+
+    def _op_wait_for(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Poll until a widget matches a condition, or timeout.
+
+        ``condition`` is one of "visible" (default) or "hidden".
+        ``timeout_ms`` defaults to 5000. Polls every 50ms by processing
+        Qt events between checks so dialogs that open asynchronously
+        can settle.
+        """
+        from PySide6.QtCore import QElapsedTimer, QCoreApplication
+        target = cmd.get("target")
+        condition = cmd.get("condition", "visible")
+        timeout_ms = int(cmd.get("timeout_ms", 5000))
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        if condition not in ("visible", "hidden"):
+            return {"error": f"condition must be visible|hidden, got {condition!r}"}
+
+        timer = QElapsedTimer()
+        timer.start()
+        while True:
+            widget = self._find_widget_any(target, occurrence=occurrence)
+            satisfied = (
+                (condition == "visible" and widget is not None and widget.isVisible())
+                or (condition == "hidden" and (widget is None or not widget.isVisible()))
+            )
+            if satisfied:
+                return {"ok": True, "elapsed_ms": timer.elapsed()}
+            if timer.elapsed() >= timeout_ms:
+                return {
+                    "error": f"timeout waiting for {target!r} to be {condition} "
+                             f"after {timeout_ms}ms",
+                }
+            QCoreApplication.processEvents()
+            # 50ms sleep without blocking the Qt main thread
+            from PySide6.QtCore import QThread
+            QThread.msleep(50)
+
+    def _op_count(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Count visible widgets matching a selector.
+
+        Useful for "list has N entries" assertions. Uses the same
+        selector grammar as find — objectName / text / tooltip / Type:N.
+        For Type:N selectors, returns the total number of visible widgets
+        of that type (ignores the :N suffix in the count).
+        """
+        target = cmd.get("target")
+        if not target:
+            return {"error": "target is required"}
+        # Strip a Type:N suffix; for counting we want the total of that type.
+        type_only = target
+        if ":" in target:
+            head, _, tail = target.partition(":")
+            try:
+                int(tail)
+                type_only = head
+            except ValueError:
+                type_only = target
+
+        count = 0
+        for w in self._window.findChildren(QWidget):
+            if not w.isVisible():
+                continue
+            if type(w).__name__ == type_only:
+                count += 1
+                continue
+            if w.objectName() == target:
+                count += 1
+                continue
+            if hasattr(w, "text"):
+                try:
+                    if w.text().strip() == target:
+                        count += 1
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+        return {"ok": True, "count": count}
+
+    def _op_get_table_rows(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Read the text content of a QTableWidget as a list of row dicts.
+
+        Each row is a dict mapping column header → cell text. If the
+        table has no horizontal header labels, falls back to col_0, col_1.
+        Returns {ok: True, rows: [{...}, ...]}.
+        """
+        from PySide6.QtWidgets import QTableWidget
+        target = cmd.get("target")
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        widget = self._find_widget(target, occurrence=occurrence)
+        if widget is None:
+            return {"error": f"widget not found: {target!r}"}
+        if not isinstance(widget, QTableWidget):
+            return {"error": f"{target!r} is {type(widget).__name__}, not QTableWidget"}
+
+        headers = []
+        for col in range(widget.columnCount()):
+            h = widget.horizontalHeaderItem(col)
+            headers.append(h.text() if h is not None else f"col_{col}")
+
+        rows = []
+        for row in range(widget.rowCount()):
+            row_dict = {}
+            for col in range(widget.columnCount()):
+                item = widget.item(row, col)
+                row_dict[headers[col]] = item.text() if item is not None else ""
+            rows.append(row_dict)
+        return {"ok": True, "rows": rows, "headers": headers}
+
+    def _find_widget_any(self, target: str, occurrence: int = 0) -> QWidget | None:
+        """Like _find_widget but includes invisible widgets in the search.
+        Used by is_visible / wait_for so callers can distinguish
+        "widget doesn't exist" from "widget exists but is hidden."
+        """
+        # Type:N selector path
+        if ":" in target:
+            type_name, _, idx_str = target.partition(":")
+            try:
+                idx = int(idx_str)
+                if type_name:
+                    hits = [w for w in self._window.findChildren(QWidget)
+                            if type(w).__name__ == type_name]
+                    return hits[idx] if 0 <= idx < len(hits) else None
+            except ValueError:
+                pass
+
+        matches = []
+        for w in self._window.findChildren(QWidget):
+            if w.objectName() == target:
+                matches.append(w)
+                continue
+            if hasattr(w, "text"):
+                try:
+                    if isinstance(w.text(), str) and w.text().strip() == target:
+                        matches.append(w)
+                        continue
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                if isinstance(w.toolTip(), str) and w.toolTip().strip() == target:
+                    matches.append(w)
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            lt = getattr(w, "label_text", None) or getattr(w, "_label_text", None)
+            if isinstance(lt, str) and lt.strip() == target:
+                matches.append(w)
+        return matches[occurrence] if 0 <= occurrence < len(matches) else None
 
     # ----- widget lookup --------------------------------------------
 
