@@ -182,7 +182,6 @@ class DevControlServer(QObject):
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
             "peer_get_aid_pre": self._op_peer_get_aid_pre,
-            "peer_export_blob": self._op_peer_export_blob,
             "peer_import_blob": self._op_peer_import_blob,
             "peer_test_send": self._op_peer_test_send,
             "peer_nav": self._op_peer_nav,
@@ -943,7 +942,13 @@ class DevControlServer(QObject):
             return {"error": f"open failed: {e}"}
 
     def _op_peer_create_test_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Create a transferable AID with no witnesses (for direct-mode tests)."""
+        """Create a transferable AID with no witnesses (for direct-mode tests).
+
+        Fires the same `identifier_created` signal the real InceptDoer
+        emits so the IdentifierListPage refreshes and the new AID shows
+        up as a clickable row. Without this, harness-driven UI tests
+        that try to click the row never see it.
+        """
         vault = self._vault()
         if vault is None:
             return {"error": "no vault open"}
@@ -954,9 +959,19 @@ class DevControlServer(QObject):
             return {"ok": True, "aid": vault.hby.habByName(alias).pre, "existing": True}
         try:
             hab = vault.hby.makeHab(name=alias, transferable=True, wits=[], toad=0)
-            return {"ok": True, "aid": hab.pre}
         except Exception as e:  # noqa: BLE001
             return {"error": f"makeHab failed: {e}"}
+        signals = getattr(vault, "signals", None)
+        if signals is not None:
+            try:
+                signals.emit_doer_event(
+                    doer_name="InceptDoer",
+                    event_type="identifier_created",
+                    data={"alias": alias, "pre": hab.pre, "success": True},
+                )
+            except Exception:  # noqa: BLE001
+                pass  # signal best-effort; harness state still consistent
+        return {"ok": True, "aid": hab.pre}
 
     def _op_peer_set_mode(self, cmd: dict[str, Any]) -> dict[str, Any]:
         from locksmith.peer.records import PeerModeSettings
@@ -1110,26 +1125,6 @@ class DevControlServer(QObject):
             paired_at=datetime.now(timezone.utc).isoformat(),
         ))
         return {"ok": True, "aid": aid, "endpoint_url": endpoint_url}
-
-    def _op_peer_export_blob(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Export the witness-less peer-OOBI blob for an exposed AID.
-
-        Mirrors what the View Identifier dialog renders when the user
-        picks the "Peer (offline)" role — same export_peer_blob call.
-        Returns {ok: True, token: "locksmith-peer-oobi:v1:<b64>"}.
-        """
-        from locksmith.peer.cesr_blob import export_peer_blob
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        alias = cmd.get("alias")
-        hab = vault.hby.habByName(alias) if alias else None
-        if hab is None:
-            return {"error": f"no hab {alias!r}"}
-        try:
-            return {"ok": True, "token": export_peer_blob(hab)}
-        except Exception as e:  # noqa: BLE001
-            return {"error": f"export_peer_blob failed: {e}"}
 
     def _op_peer_nav(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Programmatically switch the vault content area to a given page.
