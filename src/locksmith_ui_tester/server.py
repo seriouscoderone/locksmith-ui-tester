@@ -165,6 +165,7 @@ class DevControlServer(QObject):
             # the feature-coupled peer_* ops below.
             "get_text": self._op_get_text,
             "is_visible": self._op_is_visible,
+            "is_checked": self._op_is_checked,
             "wait_for": self._op_wait_for,
             "count": self._op_count,
             "get_table_rows": self._op_get_table_rows,
@@ -176,8 +177,6 @@ class DevControlServer(QObject):
             "peer_open_test_vault": self._op_peer_open_test_vault,
             "peer_create_test_aid": self._op_peer_create_test_aid,
             "peer_set_mode": self._op_peer_set_mode,
-            "peer_expose_aid": self._op_peer_expose_aid,
-            "peer_unexpose_aid": self._op_peer_unexpose_aid,
             "peer_force_pair": self._op_peer_force_pair,
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
@@ -585,6 +584,23 @@ class DevControlServer(QObject):
                 pass
         return {"ok": True, "text": ""}
 
+    def _op_is_checked(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """True if a QCheckBox / QRadioButton / checkable QPushButton
+        is currently checked. Errors if the widget has no isChecked
+        method (so callers fail loudly instead of silently treating a
+        non-checkable widget as 'not checked').
+        """
+        target = cmd.get("target")
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        widget = self._find_widget(target, occurrence=occurrence)
+        if widget is None:
+            return {"error": f"widget not found: {target!r}"}
+        if not hasattr(widget, "isChecked"):
+            return {"error": f"widget {type(widget).__name__} has no isChecked"}
+        return {"ok": True, "checked": bool(widget.isChecked())}
+
     def _op_is_visible(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """True if a widget exists in the tree AND is currently visible.
 
@@ -987,50 +1003,6 @@ class DevControlServer(QObject):
         vault.db.peerSettings.pin(keys=("default",), val=rec)
         vault.restart_peer_mode()
         return {"ok": True}
-
-    def _op_peer_expose_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Mirror the View Identifier "Expose over peer mode" toggle: mark
-        the AID exposed AND publish the peer-role/loc rpys via
-        PublishPeerRoleDoer. Without the doer, replyToOobi returns only
-        the KEL — no role/loc — and CESR-blob pairing fails with
-        "no_peer_role" on the importer.
-        """
-        from locksmith.peer.publishing import PublishPeerRoleDoer
-        from locksmith.peer.records import PeerModeSettings
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        alias = cmd.get("alias")
-        hab = vault.hby.habByName(alias) if alias else None
-        if hab is None:
-            return {"error": f"no hab {alias!r}"}
-        exposed = getattr(vault, "_peer_exposed_aids", None)
-        if exposed is None:
-            exposed = set()
-            vault._peer_exposed_aids = exposed
-        exposed.add(hab.pre)
-
-        settings = vault.db.peerSettings.get(keys=("default",)) or PeerModeSettings()
-        host = settings.advertised_host or "127.0.0.1"
-        url = f"tcp://{host}:{settings.port}"
-        doer = PublishPeerRoleDoer(
-            hby=vault.hby, hab=hab, url=url,
-            signal_bridge=getattr(vault, "signals", None), allow=True,
-        )
-        vault.extend([doer])
-        return {"ok": True, "aid": hab.pre, "url": url}
-
-    def _op_peer_unexpose_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        alias = cmd.get("alias")
-        hab = vault.hby.habByName(alias) if alias else None
-        if hab is None:
-            return {"error": f"no hab {alias!r}"}
-        exposed = getattr(vault, "_peer_exposed_aids", set())
-        exposed.discard(hab.pre)
-        return {"ok": True, "aid": hab.pre}
 
     def _op_peer_force_pair(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Directly insert a PeerRecord into the allowlist, bypassing OOBI

@@ -274,6 +274,35 @@ def test_get_text_reads_combo_current(qapp, server):
     assert result["text"] == "organization"
 
 
+def test_is_checked_reads_qcheckbox_state(qapp, server):
+    from PySide6.QtWidgets import QCheckBox
+    window, _srv, sock_path = server
+    cb = QCheckBox("Toggle me")
+    cb.setObjectName("demoCheckbox")
+    window.centralWidget().layout().addWidget(cb)
+    cb.show()
+    qapp.processEvents()
+
+    r1 = _client_send(qapp, sock_path,
+                      {"op": "is_checked", "target": "demoCheckbox"})
+    assert r1 == {"ok": True, "checked": False}
+
+    cb.setChecked(True)
+    qapp.processEvents()
+    r2 = _client_send(qapp, sock_path,
+                      {"op": "is_checked", "target": "demoCheckbox"})
+    assert r2 == {"ok": True, "checked": True}
+
+
+def test_is_checked_errors_on_non_checkable_widget(qapp, server):
+    _window, _srv, sock_path = server
+    # QLineEdit has no isChecked — should error rather than silently false.
+    result = _client_send(qapp, sock_path,
+                          {"op": "is_checked", "target": "name_field"})
+    assert "error" in result
+    assert "isChecked" in result["error"]
+
+
 def test_is_visible_distinguishes_existence_from_visibility(qapp, server):
     window, _srv, sock_path = server
     # Existing, visible widget
