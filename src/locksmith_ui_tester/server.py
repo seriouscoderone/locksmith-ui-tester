@@ -174,7 +174,6 @@ class DevControlServer(QObject):
             # bypass UI to keep the integration fixture light.
             # TODO: refactor each into click sequences using the generic
             # ops above; see plan in branch feat/direct-peer-design.
-            "peer_open_test_vault": self._op_peer_open_test_vault,
             "peer_force_pair": self._op_peer_force_pair,
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
@@ -889,69 +888,6 @@ class DevControlServer(QObject):
     def _vault(self):
         app = self._app()
         return getattr(app, "vault", None) if app else None
-
-    def _op_peer_open_test_vault(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Create + open a vault programmatically for tests.
-
-        Bypasses the open-vault dialog entirely; matches what the dialog
-        does internally (format_bran -> stretch -> habbing.Habery ->
-        run_vault_controller).
-        """
-        from keri.app import habbing as kerihabbing
-        from keri.core import signing
-        from keri.vdr import credentialing
-        from locksmith.core.habbing import (
-            format_bran, keystore_exists, open_hby,
-        )
-        from locksmith.core.crypto import stretch_password_to_passcode
-
-        name = cmd.get("name") or "peer_test"
-        passcode = cmd.get("passcode") or "DoB2-e4Rr-gVOr-Nb1Y-7yBl-gI3n-i4cB-gf07"
-        app = self._app()
-        if app is None:
-            return {"error": "no app"}
-
-        bran = stretch_password_to_passcode(format_bran(passcode))
-        base = app.config.base
-        if not keystore_exists(name, base):
-            salt = signing.Salter(raw=app.config.salt.encode("utf-8")).qb64
-            hby = kerihabbing.Habery(
-                name=name, base=base, bran=bran, salt=salt,
-                algo=app.config.algo, tier=app.config.tier,
-            )
-            hby.close()
-
-        try:
-            vault, qtask = open_hby(name=name, base=base, bran=bran, app=app)
-            # Optionally enable peer mode at the desired port. Vault.__init__
-            # has already run with the (default) settings — peer_doer is
-            # None. We pin the desired settings, then call
-            # restart_peer_mode, which on a None peer_doer simply
-            # constructs + extends. This avoids the dead-doer crash from
-            # restarting an already-running peer doer.
-            peer = cmd.get("peer") or {}
-            if peer:
-                from locksmith.peer.records import PeerModeSettings
-                vault.db.peerSettings.pin(keys=("default",), val=PeerModeSettings(
-                    enabled=bool(peer.get("enabled", True)),
-                    port=int(peer.get("port", 5621)),
-                    bind_host=peer.get("bind_host", "127.0.0.1"),
-                    advertised_host=peer.get("advertised_host", "127.0.0.1"),
-                ))
-                vault.restart_peer_mode()
-            app.open_vault(name=name, vault=vault, qtask=qtask)
-            # Trigger UI navigation to the vault page so the rest of the
-            # peer-mode UI is reachable through normal devctl click ops.
-            try:
-                from locksmith.ui.navigation import Pages
-                window = self._window
-                if hasattr(window, "nav_manager"):
-                    window.nav_manager.navigate_to(Pages.VAULT, vault_name=name)
-            except Exception:
-                pass  # navigation is a UX nicety, not required for the op
-            return {"ok": True, "name": name}
-        except Exception as e:  # noqa: BLE001
-            return {"error": f"open failed: {e}"}
 
     def _op_peer_force_pair(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Directly insert a PeerRecord into the allowlist, bypassing OOBI
