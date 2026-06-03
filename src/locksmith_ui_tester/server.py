@@ -174,7 +174,6 @@ class DevControlServer(QObject):
             # bypass UI to keep the integration fixture light.
             # TODO: refactor each into click sequences using the generic
             # ops above; see plan in branch feat/direct-peer-design.
-            "peer_force_pair": self._op_peer_force_pair,
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
             "peer_get_aid_pre": self._op_peer_get_aid_pre,
@@ -888,28 +887,6 @@ class DevControlServer(QObject):
     def _vault(self):
         app = self._app()
         return getattr(app, "vault", None) if app else None
-
-    def _op_peer_force_pair(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Directly insert a PeerRecord into the allowlist, bypassing OOBI
-        resolution. Test-only — real users use the Add Peer dialog.
-        """
-        from datetime import datetime, timezone
-        from locksmith.peer.allowlist import PeerAllowlist
-        from locksmith.peer.records import PeerRecord
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        aid = cmd.get("aid")
-        endpoint_url = cmd.get("endpoint_url")
-        if not aid or not endpoint_url:
-            return {"error": "aid and endpoint_url are required"}
-        PeerAllowlist(vault.db).add(PeerRecord(
-            aid=aid,
-            label=cmd.get("label") or aid[:12],
-            endpoint_url=endpoint_url,
-            paired_at=datetime.now(timezone.utc).isoformat(),
-        ))
-        return {"ok": True}
 
     def _op_peer_list(self, cmd: dict[str, Any]) -> dict[str, Any]:
         from locksmith.peer.allowlist import PeerAllowlist
