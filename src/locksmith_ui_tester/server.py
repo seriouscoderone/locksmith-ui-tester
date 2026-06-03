@@ -175,7 +175,6 @@ class DevControlServer(QObject):
             # TODO: refactor each into click sequences using the generic
             # ops above; see plan in branch feat/direct-peer-design.
             "peer_open_test_vault": self._op_peer_open_test_vault,
-            "peer_create_test_aid": self._op_peer_create_test_aid,
             "peer_force_pair": self._op_peer_force_pair,
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
@@ -953,38 +952,6 @@ class DevControlServer(QObject):
             return {"ok": True, "name": name}
         except Exception as e:  # noqa: BLE001
             return {"error": f"open failed: {e}"}
-
-    def _op_peer_create_test_aid(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Create a transferable AID with no witnesses (for direct-mode tests).
-
-        Fires the same `identifier_created` signal the real InceptDoer
-        emits so the IdentifierListPage refreshes and the new AID shows
-        up as a clickable row. Without this, harness-driven UI tests
-        that try to click the row never see it.
-        """
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        alias = cmd.get("alias")
-        if not alias:
-            return {"error": "alias is required"}
-        if vault.hby.habByName(alias) is not None:
-            return {"ok": True, "aid": vault.hby.habByName(alias).pre, "existing": True}
-        try:
-            hab = vault.hby.makeHab(name=alias, transferable=True, wits=[], toad=0)
-        except Exception as e:  # noqa: BLE001
-            return {"error": f"makeHab failed: {e}"}
-        signals = getattr(vault, "signals", None)
-        if signals is not None:
-            try:
-                signals.emit_doer_event(
-                    doer_name="InceptDoer",
-                    event_type="identifier_created",
-                    data={"alias": alias, "pre": hab.pre, "success": True},
-                )
-            except Exception:  # noqa: BLE001
-                pass  # signal best-effort; harness state still consistent
-        return {"ok": True, "aid": hab.pre}
 
     def _op_peer_force_pair(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Directly insert a PeerRecord into the allowlist, bypassing OOBI
