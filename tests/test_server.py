@@ -366,6 +366,38 @@ def test_get_table_rows_reads_qtablewidget_content(qapp, server):
     ]
 
 
+def test_get_list_items_reads_qlistwidget_with_userrole(qapp, server):
+    from PySide6.QtCore import Qt as QtCore_Qt
+    from PySide6.QtWidgets import QListWidget, QListWidgetItem
+    window, _srv, sock_path = server
+    lw = QListWidget()
+    lw.setObjectName("pairedPeersPage.peersList")
+    for label, aid in [("alice", "EAID_ALICE"), ("bob", "EAID_BOB")]:
+        item = QListWidgetItem(f"{label}  —  {aid}")
+        item.setData(QtCore_Qt.UserRole, aid)
+        lw.addItem(item)
+    window.centralWidget().layout().addWidget(lw)
+    lw.show()
+    qapp.processEvents()
+
+    result = _client_send(qapp, sock_path,
+                          {"op": "get_list_items",
+                           "target": "pairedPeersPage.peersList"})
+    assert result["ok"] is True
+    assert result["items"] == [
+        {"text": "alice  —  EAID_ALICE", "data": "EAID_ALICE"},
+        {"text": "bob  —  EAID_BOB", "data": "EAID_BOB"},
+    ]
+
+
+def test_get_list_items_rejects_non_list(qapp, server):
+    _window, _srv, sock_path = server
+    result = _client_send(qapp, sock_path,
+                          {"op": "get_list_items", "target": "hello_button"})
+    assert "error" in result
+    assert "not QListWidget" in result["error"]
+
+
 def test_get_table_rows_rejects_non_table(qapp, server):
     _window, _srv, sock_path = server
     result = _client_send(qapp, sock_path,

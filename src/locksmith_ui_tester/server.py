@@ -168,6 +168,7 @@ class DevControlServer(QObject):
             "wait_for": self._op_wait_for,
             "count": self._op_count,
             "get_table_rows": self._op_get_table_rows,
+            "get_list_items": self._op_get_list_items,
             # Peer-mode integration-test helpers. These intentionally
             # bypass UI to keep the integration fixture light.
             # TODO: refactor each into click sequences using the generic
@@ -679,6 +680,34 @@ class DevControlServer(QObject):
                 except Exception:  # noqa: BLE001
                     pass
         return {"ok": True, "count": count}
+
+    def _op_get_list_items(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """Read the text content of a QListWidget as a list of strings.
+
+        Each entry is the visible text of the QListWidgetItem. If a row
+        has a UserRole-stored value (common pattern for storing an AID
+        per-row), it's available under the `data` field of the
+        per-item dict. Returns {ok: True, items: [{text, data}, ...]}.
+        """
+        from PySide6.QtWidgets import QListWidget
+        target = cmd.get("target")
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        widget = self._find_widget(target, occurrence=occurrence)
+        if widget is None:
+            return {"error": f"widget not found: {target!r}"}
+        if not isinstance(widget, QListWidget):
+            return {"error": f"{target!r} is {type(widget).__name__}, not QListWidget"}
+
+        items = []
+        for i in range(widget.count()):
+            it = widget.item(i)
+            items.append({
+                "text": it.text() if it is not None else "",
+                "data": it.data(Qt.UserRole) if it is not None else None,
+            })
+        return {"ok": True, "items": items}
 
     def _op_get_table_rows(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Read the text content of a QTableWidget as a list of row dicts.
