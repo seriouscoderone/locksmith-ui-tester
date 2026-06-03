@@ -180,7 +180,6 @@ class DevControlServer(QObject):
             "peer_list": self._op_peer_list,
             "peer_get_port": self._op_peer_get_port,
             "peer_get_aid_pre": self._op_peer_get_aid_pre,
-            "peer_import_blob": self._op_peer_import_blob,
             "peer_test_send": self._op_peer_test_send,
         }
 
@@ -1044,42 +1043,6 @@ class DevControlServer(QObject):
         if hab is None:
             return {"error": f"no hab {alias!r}"}
         return {"ok": True, "aid": hab.pre}
-
-    def _op_peer_import_blob(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Mirror Add Peer dialog blob path: import the blob into the
-        vault's Habery (parses KEL + role/loc) and add the peer to the
-        allowlist with the blob's tcp endpoint.
-
-        Returns {ok: True, aid, endpoint_url}. label defaults to aid[:12].
-        """
-        from datetime import datetime, timezone
-        from keri import kering
-        from locksmith.peer.allowlist import PeerAllowlist
-        from locksmith.peer.cesr_blob import (
-            PeerBlobError, import_peer_blob,
-        )
-        from locksmith.peer.records import PeerRecord
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        blob = cmd.get("blob")
-        if not blob:
-            return {"error": "blob is required"}
-        try:
-            aid = import_peer_blob(vault.hby, blob)
-        except PeerBlobError as e:
-            return {"error": f"{e.reason}: {e}"}
-        loc = vault.hby.db.locs.get(keys=(aid, kering.Schemes.tcp))
-        endpoint_url = cmd.get("endpoint_url") or (loc.url if loc else "")
-        if not endpoint_url:
-            return {"error": "no tcp endpoint in blob"}
-        PeerAllowlist(vault.db).add(PeerRecord(
-            aid=aid,
-            label=cmd.get("label") or aid[:12],
-            endpoint_url=endpoint_url,
-            paired_at=datetime.now(timezone.utc).isoformat(),
-        ))
-        return {"ok": True, "aid": aid, "endpoint_url": endpoint_url}
 
     def _op_peer_test_send(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Drive peer_send with given recipient + bytes. Stub mailbox
