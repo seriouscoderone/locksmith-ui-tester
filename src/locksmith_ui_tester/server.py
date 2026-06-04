@@ -159,10 +159,9 @@ class DevControlServer(QObject):
             "click_row_action": self._op_click_row_action,
             "type": self._op_type,
             "select": self._op_select,
-            # Generic state-inspection ops. Cypress-equivalent: cy.get().text(),
-            # cy.get().should('be.visible'), cy.get().its('length'),
-            # cy.contains(...).wait(), etc. Tests should prefer these over
-            # the feature-coupled peer_* ops below.
+            # Generic state-inspection ops. Cypress-equivalent:
+            # cy.get().text(), cy.get().should('be.visible'),
+            # cy.get().its('length'), cy.contains(...).wait(), etc.
             "get_text": self._op_get_text,
             "is_visible": self._op_is_visible,
             "is_checked": self._op_is_checked,
@@ -170,14 +169,6 @@ class DevControlServer(QObject):
             "count": self._op_count,
             "get_table_rows": self._op_get_table_rows,
             "get_list_items": self._op_get_list_items,
-            # Peer-mode integration-test helpers. These intentionally
-            # bypass UI to keep the integration fixture light.
-            # TODO: refactor each into click sequences using the generic
-            # ops above; see plan in branch feat/direct-peer-design.
-            "peer_list": self._op_peer_list,
-            "peer_get_port": self._op_peer_get_port,
-            "peer_get_aid_pre": self._op_peer_get_aid_pre,
-            "peer_test_send": self._op_peer_test_send,
         }
 
     # ----- operations ------------------------------------------------
@@ -881,77 +872,3 @@ class DevControlServer(QObject):
 
     # ----- peer-mode helpers ----------------------------------------
 
-    def _app(self):
-        return getattr(self._window, "app", None)
-
-    def _vault(self):
-        app = self._app()
-        return getattr(app, "vault", None) if app else None
-
-    def _op_peer_list(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        from locksmith.peer.allowlist import PeerAllowlist
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        al = PeerAllowlist(vault.db)
-        return {
-            "ok": True,
-            "peers": [
-                {"aid": r.aid, "label": r.label, "endpoint_url": r.endpoint_url}
-                for r in al.list()
-            ],
-        }
-
-    def _op_peer_get_port(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        vault = self._vault()
-        if vault is None or vault.peer_doer is None or vault.peer_doer.server is None:
-            return {"error": "peer mode not running"}
-        ha = vault.peer_doer.server.ha
-        # hio Server.ha is (host, port) after bind
-        try:
-            host, port = ha
-        except (TypeError, ValueError):
-            return {"error": f"unexpected ha shape: {ha!r}"}
-        return {"ok": True, "host": host, "port": port}
-
-    def _op_peer_get_aid_pre(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        alias = cmd.get("alias")
-        hab = vault.hby.habByName(alias) if alias else None
-        if hab is None:
-            return {"error": f"no hab {alias!r}"}
-        return {"ok": True, "aid": hab.pre}
-
-    def _op_peer_test_send(self, cmd: dict[str, Any]) -> dict[str, Any]:
-        """Drive peer_send with given recipient + bytes. Stub mailbox
-        callback records whether fallback was attempted. Test-only."""
-        from locksmith.peer.allowlist import PeerAllowlist
-        from locksmith.peer.sending import peer_send
-        vault = self._vault()
-        if vault is None:
-            return {"error": "no vault open"}
-        recipient_aid = cmd.get("recipient_aid")
-        payload_str = cmd.get("payload", "")
-        if not recipient_aid:
-            return {"error": "recipient_aid is required"}
-        payload = payload_str.encode("utf-8") if isinstance(payload_str, str) else bytes(payload_str)
-
-        mailbox_calls = []
-
-        def stub_mailbox(aid, bs):
-            mailbox_calls.append((aid, len(bs)))
-            return True
-
-        outcome = peer_send(
-            allowlist=PeerAllowlist(vault.db),
-            recipient_aid=recipient_aid,
-            exn_bytes=payload,
-            mailbox_send=stub_mailbox,
-        )
-        return {
-            "ok": True,
-            "outcome": outcome.value,
-            "mailbox_calls": mailbox_calls,
-        }
