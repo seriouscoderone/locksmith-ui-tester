@@ -178,7 +178,19 @@ class DevControlServer(QObject):
 
     def _op_screenshot(self, cmd: dict[str, Any]) -> dict[str, Any]:
         path = cmd.get("path", "/tmp/locksmith-screenshot.png")
-        pix = self._window.grab()
+        target = cmd.get("target")
+        # Optional `target` resolves via the same selector logic as click/type
+        # (objectName, .text(), .toolTip(), Type:N). Falls back to the main
+        # window for backward compat. The target path is what makes
+        # top-level dialogs (parented to the main window but rendered in
+        # their own Qt window) capturable — main-window grab() misses them.
+        if target:
+            widget = self._find_widget_any(target)
+            if widget is None:
+                return {"error": f"target not found: {target!r}"}
+        else:
+            widget = self._window
+        pix = widget.grab()
         if pix.isNull():
             return {"error": "grab returned a null pixmap"}
         if not pix.save(path):
@@ -187,6 +199,7 @@ class DevControlServer(QObject):
             "ok": True,
             "path": path,
             "size": [pix.width(), pix.height()],
+            "target": target,
         }
 
     def _op_tree(self, cmd: dict[str, Any]) -> dict[str, Any]:

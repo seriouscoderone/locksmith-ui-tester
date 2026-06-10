@@ -160,6 +160,37 @@ def test_screenshot_saves_png(qapp, server, tmp_path):
     assert os.path.getsize(out) > 0
 
 
+def test_screenshot_with_target_grabs_specific_widget(qapp, server, tmp_path):
+    """Passing `target` resolves the same way click/type do — useful for
+    capturing top-level dialogs that aren't part of the main-window
+    pixmap."""
+    _window, _srv, sock_path = server
+    out = str(tmp_path / "btn.png")
+    result = _client_send(
+        qapp, sock_path,
+        {"op": "screenshot", "path": out, "target": "hello_button"},
+    )
+    assert result["ok"] is True
+    assert result["path"] == out
+    assert result["target"] == "hello_button"
+    assert os.path.exists(out)
+    assert os.path.getsize(out) > 0
+    # The button is much smaller than the whole window (300×200).
+    assert result["size"][0] < 300
+
+
+def test_screenshot_with_unknown_target_returns_error(qapp, server, tmp_path):
+    _window, _srv, sock_path = server
+    out = str(tmp_path / "missing.png")
+    result = _client_send(
+        qapp, sock_path,
+        {"op": "screenshot", "path": out, "target": "no_such_widget"},
+    )
+    assert "error" in result
+    assert "no_such_widget" in result["error"]
+    assert not os.path.exists(out)
+
+
 def test_tree_lists_visible_widgets(qapp, server):
     _window, _srv, sock_path = server
     result = _client_send(qapp, sock_path, {"op": "tree"})

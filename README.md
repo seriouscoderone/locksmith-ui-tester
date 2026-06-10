@@ -11,7 +11,7 @@ When installed and not excluded, the plugin starts a `DevControlServer` while th
 | Op | What it does |
 |---|---|
 | `ping` | Liveness check |
-| `screenshot` | Save a PNG of the main window |
+| `screenshot` | Save a PNG of the main window (or a specific widget via `target`, e.g. a top-level dialog) |
 | `tree` | Enumerate visible widgets with type, rect, text, tooltip |
 | `current_page` | Report the current vault sub-page key |
 | `click` | Click a widget by objectName / text / tooltip / `Type:N` selector |
