@@ -17,7 +17,25 @@ When installed and not excluded, the plugin starts a `DevControlServer` while th
 | `click` | Click a widget by objectName / text / tooltip / `Type:N` selector |
 | `click_list_item` | Click an item in a QListWidget by its text |
 | `type` | Type into a QLineEdit by selector |
-| `select` | Set a QComboBox value by selector |
+| `select` | Set a QComboBox value by selector (by `value` or bounds-checked `index`) |
+| `is_enabled` | Report whether a widget exists and is enabled |
+
+> This table documents a subset of the ops. `get_text`, `is_visible`, `is_checked`, `wait_for`, `count`, `get_table_rows`, `get_list_items`, `click_table_row`, and `click_row_action` are also available — send an unknown op to get the authoritative list back in the `available` field.
+
+### Disabled targets are refused
+
+The ops that drive the UI — `click`, `type`, `select`, `click_list_item`, `click_table_row`, `click_row_action` — return an `error` when their target is disabled, rather than reporting success for an action that didn't happen.
+
+This matters because Qt's disabled state blocks *input events*, not *programmatic setters*. `QAbstractButton.click()` silently no-ops on a disabled button, but `setText()` and `setCurrentIndex()` succeed outright — so an unguarded `type` or `select` would drive the app into a state no user could reach and let the run continue against it.
+
+The refusal carries the resolved widget under a `widget` key for diagnostics. To assert that a control is *correctly* inert, read it instead of driving it:
+
+```bash
+devctl is_enabled '{"target": "submitButton"}'      # {"ok": true, "enabled": false, "exists": true}
+devctl wait_for '{"target": "submitButton", "condition": "enabled"}'
+```
+
+`wait_for` accepts `visible`, `hidden`, `enabled`, and `disabled`. The latter two require the widget to exist *and* be visible, so a passing `wait_for enabled` guarantees the following `click` can resolve the same target. Note that absence satisfies `hidden` but never `disabled` — a widget that isn't there is missing, not inert.
 
 ## Install
 

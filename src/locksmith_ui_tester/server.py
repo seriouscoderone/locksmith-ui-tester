@@ -164,6 +164,7 @@ class DevControlServer(QObject):
             # cy.get().its('length'), cy.contains(...).wait(), etc.
             "get_text": self._op_get_text,
             "is_visible": self._op_is_visible,
+            "is_enabled": self._op_is_enabled,
             "is_checked": self._op_is_checked,
             "wait_for": self._op_wait_for,
             "count": self._op_count,
@@ -244,6 +245,36 @@ class DevControlServer(QObject):
             pass
         return info
 
+    def _require_enabled(
+        self, widget: QWidget, target: Any, action: str,
+    ) -> dict[str, Any] | None:
+        """Error dict if ``widget`` is disabled, else None.
+
+        The driving ops refuse disabled targets rather than reporting a
+        successful no-op. Qt's disabled state blocks input events but not
+        programmatic setters, so the failure mode differs per op and all
+        of them lie: click() no-ops silently, while setText() and
+        setCurrentIndex() succeed outright and leave the app in a state a
+        user could not have produced.
+
+        Call this only AFTER the target has been resolved. Folding the
+        check into a search loop would turn a precise "disabled" report
+        back into a vague "not found".
+
+        isEnabled() is false when any ancestor is disabled, so this
+        reflects what the user would actually experience.
+        """
+        if widget.isEnabled():
+            return None
+        # Diagnostics ride along under "widget" rather than the op's
+        # success key ("clicked"), which would assert an action that
+        # never happened.
+        return {
+            "error": f"widget {target!r} is disabled; {action} would not "
+                     f"reflect anything a user could do",
+            "widget": self._widget_info(widget),
+        }
+
     def _op_current_page(self, cmd: dict[str, Any]) -> dict[str, Any]:
         # Look on both the window and the LocksmithApplication
         # (mirrors how the plugin code does the lookup).
@@ -268,6 +299,9 @@ class DevControlServer(QObject):
         widget = self._find_widget(target)
         if widget is None:
             return {"error": f"widget not found: {target!r}"}
+        refusal = self._require_enabled(widget, target, "the click")
+        if refusal is not None:
+            return refusal
         if hasattr(widget, "click"):
             widget.click()
         else:
@@ -299,6 +333,21 @@ class DevControlServer(QObject):
             for i in range(lw.count()):
                 item = lw.item(i)
                 if item.text().strip() == item_text:
+                    # Guard after the match, not as another `continue` in
+                    # the loop — otherwise a disabled list falls through
+                    # to "list item not found", blaming the selector for
+                    # what is really an app-state problem.
+                    refusal = self._require_enabled(
+                        lw, lw.objectName() or "QListWidget", "the click")
+                    if refusal is not None:
+                        return refusal
+                    if not (item.flags() & Qt.ItemIsEnabled):
+                        return {
+                            "error": f"list item {item_text!r} is disabled; "
+                                     f"the click would not reflect anything a "
+                                     f"user could do",
+                            "widget": self._widget_info(lw),
+                        }
                     lw.setCurrentItem(item)
                     # QListWidget internally translates clicked(QModelIndex)
                     # into itemClicked(QListWidgetItem) — emitting only
@@ -336,6 +385,18 @@ class DevControlServer(QObject):
                     if item is None:
                         continue
                     if item.text().strip() == text:
+                        # After the match — see _op_click_list_item.
+                        refusal = self._require_enabled(
+                            tw, tw.objectName() or "QTableWidget", "the click")
+                        if refusal is not None:
+                            return refusal
+                        if not (item.flags() & Qt.ItemIsEnabled):
+                            return {
+                                "error": f"table row {text!r} is disabled; the "
+                                         f"click would not reflect anything a "
+                                         f"user could do",
+                                "widget": self._widget_info(tw),
+                            }
                         tw.selectRow(row)
                         # Emit both cellPressed and cellClicked since
                         # different consumers may listen on either signal.
@@ -389,6 +450,10 @@ class DevControlServer(QObject):
                         break
                 if not row_matches:
                     continue
+                refusal = self._require_enabled(
+                    tw, tw.objectName() or "QTableWidget", f"triggering {action!r}")
+                if refusal is not None:
+                    return refusal
                 # Find the SkewersMenuButton in any cell widget on this row.
                 for col in range(tw.columnCount()):
                     cell = tw.cellWidget(row, col)
@@ -405,6 +470,11 @@ class DevControlServer(QObject):
                                 "error": f"action {action!r} not available on row "
                                          f"{row_text!r}; available={candidate.actions_list}",
                             }
+                        refusal = self._require_enabled(
+                            candidate, f"action menu on row {row_text}",
+                            f"triggering {action!r}")
+                        if refusal is not None:
+                            return refusal
                         candidate.action_triggered.emit(action)
                         return {
                             "ok": True,
@@ -438,6 +508,11 @@ class DevControlServer(QObject):
         )
         if isinstance(inner, (QLineEdit, QTextEdit, QPlainTextEdit)):
             widget = inner
+        # After the unwrap, so a disabled wrapper is caught via the inner
+        # widget's inherited state and every write path below is covered.
+        refusal = self._require_enabled(widget, target, "typing")
+        if refusal is not None:
+            return refusal
         if isinstance(widget, QPlainTextEdit):
             widget.setPlainText(text)
             return {"ok": True, "wrote_to": type(widget).__name__}
@@ -505,8 +580,22 @@ class DevControlServer(QObject):
         if not hasattr(combo, "setCurrentIndex") or not hasattr(combo, "findText"):
             return {"error": f"widget {type(widget).__name__} is not a QComboBox"}
 
+        refusal = self._require_enabled(combo, target, "selecting")
+        if refusal is not None:
+            return refusal
+
         if index is not None:
             target_idx = int(index)
+            # setCurrentIndex ignores an out-of-range index, so without
+            # this the op returns ok with an unchanged combo. Mirror the
+            # `value` path's diagnostic and enumerate what IS there.
+            if not 0 <= target_idx < combo.count():
+                items = [combo.itemText(i) for i in range(combo.count())]
+                return {
+                    "error": f"index {target_idx} out of range for combo "
+                             f"{target!r} with {combo.count()} items; "
+                             f"available={items}",
+                }
         else:
             target_idx = combo.findText(str(value))
             if target_idx < 0:
@@ -616,42 +705,88 @@ class DevControlServer(QObject):
             return {"ok": True, "visible": False, "exists": False}
         return {"ok": True, "visible": widget.isVisible(), "exists": True}
 
+    def _op_is_enabled(self, cmd: dict[str, Any]) -> dict[str, Any]:
+        """True if a widget exists AND is currently enabled.
+
+        Counterpart to is_visible, and the supported way to assert that a
+        control is correctly inert — the driving ops (click/type/select
+        and the table/list variants) refuse disabled targets outright, so
+        inertness is checked by reading rather than by driving.
+
+        Qt reports a widget as disabled when any ancestor is disabled, so
+        this reflects the effective state the user would experience.
+        """
+        target = cmd.get("target")
+        occurrence = cmd.get("occurrence", 0)
+        if not target:
+            return {"error": "target is required"}
+        widget = self._find_widget_any(target, occurrence=occurrence)
+        if widget is None:
+            return {"ok": True, "enabled": False, "exists": False}
+        return {"ok": True, "enabled": widget.isEnabled(), "exists": True}
+
     def _op_wait_for(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Poll until a widget matches a condition, or timeout.
 
-        ``condition`` is one of "visible" (default) or "hidden".
-        ``timeout_ms`` defaults to 5000. Polls every 50ms by processing
-        Qt events between checks so dialogs that open asynchronously
-        can settle.
+        ``condition`` is one of "visible" (default), "hidden", "enabled"
+        or "disabled". ``timeout_ms`` defaults to 5000. Polls every 50ms
+        by processing Qt events between checks so dialogs that open
+        asynchronously can settle.
+
+        "enabled"/"disabled" both require the widget to exist AND be
+        visible, differing only on isEnabled(). Two consequences worth
+        knowing:
+
+        - Absence does NOT satisfy "disabled" (unlike "hidden", where a
+          widget that isn't there is legitimately not showing). A widget
+          that does not exist is missing, not inert, and treating the two
+          alike would make a typo'd target return ok instantly.
+        - "enabled" implies visible, so a success here guarantees the
+          click/type/select that follows can resolve the same target —
+          those go through _find_widget, which skips invisible widgets.
         """
-        from PySide6.QtCore import QElapsedTimer, QCoreApplication
+        from PySide6.QtCore import QCoreApplication, QElapsedTimer, QThread
+        conditions = ("visible", "hidden", "enabled", "disabled")
         target = cmd.get("target")
         condition = cmd.get("condition", "visible")
         timeout_ms = int(cmd.get("timeout_ms", 5000))
         occurrence = cmd.get("occurrence", 0)
         if not target:
             return {"error": "target is required"}
-        if condition not in ("visible", "hidden"):
-            return {"error": f"condition must be visible|hidden, got {condition!r}"}
+        if condition not in conditions:
+            return {"error": f"condition must be {'|'.join(conditions)}, "
+                             f"got {condition!r}"}
 
         timer = QElapsedTimer()
         timer.start()
         while True:
             widget = self._find_widget_any(target, occurrence=occurrence)
+            visible = widget is not None and widget.isVisible()
             satisfied = (
-                (condition == "visible" and widget is not None and widget.isVisible())
-                or (condition == "hidden" and (widget is None or not widget.isVisible()))
+                (condition == "visible" and visible)
+                or (condition == "hidden" and not visible)
+                or (condition == "enabled" and visible and widget.isEnabled())
+                or (condition == "disabled" and visible and not widget.isEnabled())
             )
             if satisfied:
                 return {"ok": True, "elapsed_ms": timer.elapsed()}
             if timer.elapsed() >= timeout_ms:
+                # Absent, present-but-hidden, and present-but-wrong-state
+                # are three different bugs. Report which one it was rather
+                # than a bare "timeout" that sends the reader hunting.
+                if widget is None:
+                    last_seen = "not found"
+                elif not visible:
+                    last_seen = "hidden"
+                else:
+                    last_seen = ("visible and enabled" if widget.isEnabled()
+                                 else "visible and disabled")
                 return {
                     "error": f"timeout waiting for {target!r} to be {condition} "
-                             f"after {timeout_ms}ms",
+                             f"after {timeout_ms}ms; last seen: {last_seen}",
                 }
             QCoreApplication.processEvents()
             # 50ms sleep without blocking the Qt main thread
-            from PySide6.QtCore import QThread
             QThread.msleep(50)
 
     def _op_count(self, cmd: dict[str, Any]) -> dict[str, Any]:
